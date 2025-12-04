@@ -377,13 +377,33 @@ jobs:
         uses: actions/github-script@v7
         env:
           PR_DATA: ${{ steps.collect.outputs.result }}
+          REPOS_TO_CHECK: ${{ steps.repos.outputs.repos }}
         with:
           github-token: ${{ secrets.REPO_ACCESS_TOKEN }}
           script: |
             const prData = JSON.parse(process.env.PR_DATA);
+            const reposToCheck = process.env.REPOS_TO_CHECK.split(',').map(r => r.trim()).filter(r => r);
+            
+            // Build a map of repo name -> owner
+            const repoOwnerMap = {};
+            for (const repoFullName of reposToCheck) {
+              const [owner, repo] = repoFullName.split('/');
+              if (owner && repo) {
+                repoOwnerMap[repo] = owner;
+              }
+            }
+            
+            console.log('Repo owner map:', repoOwnerMap);
             
             for (const [repo, prs] of Object.entries(prData)) {
-              const owner = context.repo.owner;
+              const owner = repoOwnerMap[repo];
+              
+              if (!owner) {
+                console.log(`❌ Could not find owner for repo: ${repo}`);
+                continue;
+              }
+              
+              console.log(`\n📦 Removing labels from ${owner}/${repo}...`);
               
               for (const pr of prs) {
                 try {
@@ -393,9 +413,9 @@ jobs:
                     issue_number: pr.number,
                     name: 'release'
                   });
-                  console.log(`Removed 'release' label from ${repo}#${pr.number}`);
+                  console.log(`  ✅ Removed 'release' label from PR#${pr.number}`);
                 } catch (error) {
-                  console.log(`Could not remove label from ${repo}#${pr.number}: ${error.message}`);
+                  console.log(`  ❌ Could not remove label from PR#${pr.number}: ${error.message}`);
                 }
               }
             }
