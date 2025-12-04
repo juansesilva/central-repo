@@ -1,0 +1,289 @@
+name: Generate Release Notes
+
+on:
+  # Triggered by other repos when they create a production tag
+  repository_dispatch:
+    types: [release-ready]
+  
+  # Manual trigger with UI form
+  workflow_dispatch:
+    inputs:
+      release_name:
+        description: 'Release name (e.g., Weekly Release, Hotfix)'
+        required: false
+        default: 'Weekly Release'
+      repos:
+        description: 'Repos to include (comma-separated, or "all")'
+        required: false
+        default: 'all'
+
+env:
+  CONFLUENCE_BASE_URL: https://boompay.atlassian.net/wiki
+  CONFLUENCE_SPACE_KEY: RN
+  CONFLUENCE_PARENT_PAGE_ID: '48562454'
+  JIRA_BASE_URL: https://boompay.atlassian.net/browse
+  
+  # List of all repositories to check
+  ALL_REPOS: |
+    juansesilva/hack-repo1
+    juansesilva/hack-repo2
+
+jobs:
+  generate-release-notes:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Determine which repos to process
+        id: repos
+        run: |
+          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            # Single repo triggered this
+            echo "repos=${{ github.event.client_payload.repo }}" >> $GITHUB_OUTPUT
+            echo "triggered_by=tag" >> $GITHUB_OUTPUT
+            echo "tag=${{ github.event.client_payload.tag }}" >> $GITHUB_OUTPUT
+          else
+            # Manual trigger
+            INPUT_REPOS="${{ github.event.inputs.repos }}"
+            if [[ "$INPUT_REPOS" == "all" || -z "$INPUT_REPOS" ]]; then
+              # Use all repos (remove newlines)
+              REPOS=$(echo "$ALL_REPOS" | tr '\n' ',' | sed 's/,$//')
+              echo "repos=$REPOS" >> $GITHUB_OUTPUT
+            else
+              echo "repos=$INPUT_REPOS" >> $GITHUB_OUTPUT
+            fi
+            echo "triggered_by=manual" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Collect PRs from all repositories
+        id: collect
+        uses: actions/github-script@v7
+        env:
+          REPOS_TO_CHECK: ${{ steps.repos.outputs.repos }}
+        with:
+          github-token: ${{ secrets.REPO_ACCESS_TOKEN }}
+          script: |
+            const repos = process.env.REPOS_TO_CHECK.split(',').map(r => r.trim()).filter(r => r);
+            const allPRs = {};
+            
+            for (const repoFullName of repos) {
+              const [owner, repo] = repoFullName.split('/');
+              console.log(`Checking ${owner}/${repo}...`);
+              
+              try {
+                // Get merged PRs with 'release' label from both master and main branches
+                const branches = ['master', 'main'];
+                const allPRsData = [];
+                
+                for (const branch of branches) {
+                  try {
+                    const prs = await github.rest.pulls.list({
+                      owner,
+                      repo,
+                      state: 'closed',
+                      base: branch,
+                      per_page: 100,
+                      sort: 'updated',
+                      direction: 'desc'
+                    });
+                    allPRsData.push(...prs.data);
+                  } catch (branchError) {
+                    // Branch might not exist, continue to next branch
+                    console.log(`Branch '${branch}' not found or error: ${branchError.message}`);
+                  }
+                }
+                
+                // Remove duplicates based on PR number
+                const uniquePRs = Array.from(
+                  new Map(allPRsData.map(pr => [pr.number, pr])).values()
+                );
+                
+                const releasePRs = [];
+                
+                for (const pr of uniquePRs) {
+                  // Check if PR has 'release' label and is merged
+                  const hasReleaseLabel = pr.labels.some(l => l.name.toLowerCase() === 'release');
+                  
+                  if (hasReleaseLabel && pr.merged_at) {
+                    // Extract JIRA ticket from PR body (looking for links like https://boompay.atlassian.net/browse/BSCPF-1234)
+                    const jiraPattern = /https:\/\/boompay\.atlassian\.net\/browse\/([A-Z]+-\d+)/g;
+                    const bodyMatches = pr.body ? [...pr.body.matchAll(jiraPattern)] : [];
+                    
+                    // Also check PR title for ticket ID
+                    const titlePattern = /([A-Z]+-\d+)/;
+                    const titleMatch = pr.title.match(titlePattern);
+                    
+                    let ticketId = '';
+                    if (bodyMatches.length > 0) {
+                      ticketId = bodyMatches[0][1]; // First match from body
+                    } else if (titleMatch) {
+                      ticketId = titleMatch[1]; // Fallback to title
+                    }
+                    
+                    releasePRs.push({
+                      number: pr.number,
+                      title: pr.title,
+                      author: pr.user.login,
+                      ticketId: ticketId,
+                      mergedAt: pr.merged_at,
+                      url: pr.html_url
+                    });
+                  }
+                }
+                
+                if (releasePRs.length > 0) {
+                  allPRs[repo] = releasePRs;
+                }
+                
+              } catch (error) {
+                console.error(`Error fetching PRs from ${repoFullName}: ${error.message}`);
+              }
+            }
+            
+            return allPRs;
+
+      - name: Format release notes
+        id: format
+        uses: actions/github-script@v7
+        env:
+          PR_DATA: ${{ steps.collect.outputs.result }}
+          JIRA_BASE: ${{ env.JIRA_BASE_URL }}
+        with:
+          script: |
+            const prData = JSON.parse(process.env.PR_DATA);
+            const jiraBase = process.env.JIRA_BASE;
+            const today = new Date();
+            const dateStr = today.toLocaleDateString('en-GB', { 
+              day: '2-digit', 
+              month: '2-digit', 
+              year: 'numeric' 
+            }).replace(/\//g, '');
+            
+            // Format for Slack
+            let slackMessage = `*🚀 Release Notes - ${dateStr}*\n\n`;
+            
+            // Format for Confluence (HTML)
+            let confluenceHtml = `<h1>Release Notes - ${dateStr}</h1>`;
+            
+            for (const [repo, prs] of Object.entries(prData)) {
+              // Slack format
+              slackMessage += `*${repo}*\n`;
+              
+              // Confluence format
+              confluenceHtml += `<h2>${repo}</h2><ul>`;
+              
+              for (const pr of prs) {
+                const ticketLink = pr.ticketId ? `${jiraBase}/${pr.ticketId}` : '';
+                const ticketDisplay = pr.ticketId || 'No ticket';
+                
+                // Slack: {ticket_id} - {PR Title} - PR#xxxx - @author
+                if (pr.ticketId) {
+                  slackMessage += `  • <${ticketLink}|${pr.ticketId}> - ${pr.title} - <${pr.url}|PR#${pr.number}> @${pr.author}\n`;
+                } else {
+                  slackMessage += `  • ${ticketDisplay} - ${pr.title} - <${pr.url}|PR#${pr.number}> @${pr.author}\n`;
+                }
+                
+                // Confluence HTML
+                if (pr.ticketId) {
+                  confluenceHtml += `<li><a href="${ticketLink}">${pr.ticketId}</a> - ${pr.title} - <a href="${pr.url}">PR#${pr.number}</a> @${pr.author}</li>`;
+                } else {
+                  confluenceHtml += `<li>${ticketDisplay} - ${pr.title} - <a href="${pr.url}">PR#${pr.number}</a> @${pr.author}</li>`;
+                }
+              }
+              
+              slackMessage += '\n';
+              confluenceHtml += '</ul>';
+            }
+            
+            // Check if we have any PRs
+            if (Object.keys(prData).length === 0) {
+              slackMessage = `*🚀 Release Notes - ${dateStr}*\n\nNo PRs with 'release' label found.`;
+              confluenceHtml = `<h1>Release Notes - ${dateStr}</h1><p>No PRs with 'release' label found.</p>`;
+            }
+            
+            core.setOutput('slack_message', slackMessage);
+            core.setOutput('confluence_html', confluenceHtml);
+            core.setOutput('date_title', dateStr);
+            core.setOutput('has_prs', Object.keys(prData).length > 0);
+
+      - name: Post to Slack
+        if: steps.format.outputs.has_prs == 'true'
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
+          slack-message: ${{ steps.format.outputs.slack_message }}
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+      - name: Create Confluence page
+        if: steps.format.outputs.has_prs == 'true'
+        run: |
+          # Create new page under Release Notes space
+          DATE_TITLE="${{ steps.format.outputs.date_title }}"
+          
+          # Escape the HTML content for JSON
+          CONTENT=$(echo '${{ steps.format.outputs.confluence_html }}' | jq -Rs .)
+          
+          # Create the page
+          curl -X POST \
+            "${{ env.CONFLUENCE_BASE_URL }}/rest/api/content" \
+            -H "Authorization: Basic ${{ secrets.CONFLUENCE_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"type\": \"page\",
+              \"title\": \"${DATE_TITLE}\",
+              \"ancestors\": [{\"id\": \"${{ env.CONFLUENCE_PARENT_PAGE_ID }}\"}],
+              \"space\": {\"key\": \"${{ env.CONFLUENCE_SPACE_KEY }}\"},
+              \"body\": {
+                \"storage\": {
+                  \"value\": ${CONTENT},
+                  \"representation\": \"storage\"
+                }
+              }
+            }"
+
+      - name: Remove release labels from processed PRs
+        if: steps.format.outputs.has_prs == 'true'
+        uses: actions/github-script@v7
+        env:
+          PR_DATA: ${{ steps.collect.outputs.result }}
+        with:
+          github-token: ${{ secrets.REPO_ACCESS_TOKEN }}
+          script: |
+            const prData = JSON.parse(process.env.PR_DATA);
+            
+            for (const [repo, prs] of Object.entries(prData)) {
+              const owner = context.repo.owner; // Assumes same org
+              
+              for (const pr of prs) {
+                try {
+                  await github.rest.issues.removeLabel({
+                    owner,
+                    repo,
+                    issue_number: pr.number,
+                    name: 'release'
+                  });
+                  console.log(`Removed 'release' label from ${repo}#${pr.number}`);
+                } catch (error) {
+                  console.log(`Could not remove label from ${repo}#${pr.number}: ${error.message}`);
+                }
+              }
+            }
+
+      - name: Summary
+        run: |
+          echo "## Release Notes Generated! 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Date:** ${{ steps.format.outputs.date_title }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Actions completed:**" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Posted to Slack" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Created Confluence page" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Removed 'release' labels from processed PRs" >> $GITHUB_STEP_SUMMARY
