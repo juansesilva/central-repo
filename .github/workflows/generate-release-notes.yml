@@ -16,6 +16,11 @@ on:
         description: 'Repos to include (comma-separated, or "all")'
         required: false
         default: 'all'
+      dry_run:
+        description: 'Dry run - only show PRs, do not post anywhere'
+        type: boolean
+        required: false
+        default: true
 
 env:
   CONFLUENCE_BASE_URL: https://boompay.atlassian.net/wiki
@@ -24,6 +29,7 @@ env:
   JIRA_BASE_URL: https://boompay.atlassian.net/browse
   
   # List of all repositories to check
+  # ⚠️ UPDATE THESE WITH YOUR ACTUAL ORG/REPO NAMES
   ALL_REPOS: |
     juansesilva/hack-repo1
     juansesilva/hack-repo2
@@ -41,26 +47,52 @@ jobs:
         with:
           node-version: '20'
 
+      - name: "🔍 DEBUG: Show trigger info"
+        run: |
+          echo "## Trigger Information" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Event name | ${{ github.event_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Dry run | ${{ github.event.inputs.dry_run }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Input repos | ${{ github.event.inputs.repos }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Dispatch repo | ${{ github.event.client_payload.repo }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Dispatch tag | ${{ github.event.client_payload.tag }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
       - name: Determine which repos to process
         id: repos
         run: |
+          echo "## Repos to Process" >> $GITHUB_STEP_SUMMARY
+          
           if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
             # Single repo triggered this
             echo "repos=${{ github.event.client_payload.repo }}" >> $GITHUB_OUTPUT
             echo "triggered_by=tag" >> $GITHUB_OUTPUT
             echo "tag=${{ github.event.client_payload.tag }}" >> $GITHUB_OUTPUT
+            echo "Triggered by tag from: ${{ github.event.client_payload.repo }}" >> $GITHUB_STEP_SUMMARY
           else
             # Manual trigger
             INPUT_REPOS="${{ github.event.inputs.repos }}"
             if [[ "$INPUT_REPOS" == "all" || -z "$INPUT_REPOS" ]]; then
               # Use all repos (remove newlines)
-              REPOS=$(echo "$ALL_REPOS" | tr '\n' ',' | sed 's/,$//')
+              REPOS=$(echo "$ALL_REPOS" | tr '\n' ',' | sed 's/,$//' | sed 's/^,//')
               echo "repos=$REPOS" >> $GITHUB_OUTPUT
+              echo "Using ALL_REPOS: $REPOS" >> $GITHUB_STEP_SUMMARY
             else
               echo "repos=$INPUT_REPOS" >> $GITHUB_OUTPUT
+              echo "Using input repos: $INPUT_REPOS" >> $GITHUB_STEP_SUMMARY
             fi
             echo "triggered_by=manual" >> $GITHUB_OUTPUT
           fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: "🔍 DEBUG: Show repos being checked"
+        run: |
+          echo "### Repositories to check:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.repos.outputs.repos }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
 
       - name: Collect PRs from all repositories
         id: collect
@@ -72,47 +104,76 @@ jobs:
           script: |
             const repos = process.env.REPOS_TO_CHECK.split(',').map(r => r.trim()).filter(r => r);
             const allPRs = {};
+            const debugInfo = [];
+            
+            console.log('='.repeat(50));
+            console.log('REPOS TO CHECK:', repos);
+            console.log('='.repeat(50));
             
             for (const repoFullName of repos) {
               const [owner, repo] = repoFullName.split('/');
-              console.log(`Checking ${owner}/${repo}...`);
+              console.log(`\n📦 Checking ${owner}/${repo}...`);
+              debugInfo.push(`\n### ${owner}/${repo}`);
+              
+              if (!owner || !repo) {
+                console.log(`❌ Invalid repo format: ${repoFullName}`);
+                debugInfo.push(`❌ Invalid repo format: ${repoFullName}`);
+                continue;
+              }
               
               try {
-                // Get merged PRs with 'release' label from both master and main branches
-                const branches = ['master', 'main'];
-                const allPRsData = [];
+                // Get merged PRs from both master and main branches
+                let allPRsData = [];
                 
-                for (const branch of branches) {
+                for (const baseBranch of ['master', 'main']) {
                   try {
                     const prs = await github.rest.pulls.list({
                       owner,
                       repo,
                       state: 'closed',
-                      base: branch,
+                      base: baseBranch,
                       per_page: 100,
                       sort: 'updated',
                       direction: 'desc'
                     });
-                    allPRsData.push(...prs.data);
+                    console.log(`  📝 Found ${prs.data.length} closed PRs to ${baseBranch}`);
+                    debugInfo.push(`- Closed PRs to ${baseBranch}: ${prs.data.length}`);
+                    allPRsData = allPRsData.concat(prs.data);
                   } catch (branchError) {
-                    // Branch might not exist, continue to next branch
-                    console.log(`Branch '${branch}' not found or error: ${branchError.message}`);
+                    console.log(`  ℹ️ Branch '${baseBranch}' not found or no PRs`);
                   }
                 }
                 
-                // Remove duplicates based on PR number
-                const uniquePRs = Array.from(
-                  new Map(allPRsData.map(pr => [pr.number, pr])).values()
-                );
+                // Deduplicate PRs (in case a PR somehow appears in both)
+                const seenPRs = new Set();
+                const prsData = allPRsData.filter(pr => {
+                  if (seenPRs.has(pr.number)) return false;
+                  seenPRs.add(pr.number);
+                  return true;
+                });
+                
+                console.log(`  📝 Total unique closed PRs found: ${prsData.length}`);
+                debugInfo.push(`- Total unique closed PRs: ${prsData.length}`);
                 
                 const releasePRs = [];
+                let mergedCount = 0;
+                let withLabelCount = 0;
                 
-                for (const pr of uniquePRs) {
-                  // Check if PR has 'release' label and is merged
-                  const hasReleaseLabel = pr.labels.some(l => l.name.toLowerCase() === 'release');
+                for (const pr of prsData) {
+                  const isMerged = !!pr.merged_at;
+                  const labels = pr.labels.map(l => l.name.toLowerCase());
+                  const hasReleaseLabel = labels.includes('release');
                   
-                  if (hasReleaseLabel && pr.merged_at) {
-                    // Extract JIRA ticket from PR body (looking for links like https://boompay.atlassian.net/browse/BSCPF-1234)
+                  if (isMerged) mergedCount++;
+                  if (hasReleaseLabel) withLabelCount++;
+                  
+                  // Log first 5 PRs for debugging
+                  if (prsData.indexOf(pr) < 5) {
+                    console.log(`    PR#${pr.number}: "${pr.title.substring(0, 50)}..." | merged: ${isMerged} | labels: [${labels.join(', ')}]`);
+                  }
+                  
+                  if (hasReleaseLabel && isMerged) {
+                    // Extract JIRA ticket from PR body
                     const jiraPattern = /https:\/\/boompay\.atlassian\.net\/browse\/([A-Z]+-\d+)/g;
                     const bodyMatches = pr.body ? [...pr.body.matchAll(jiraPattern)] : [];
                     
@@ -122,9 +183,9 @@ jobs:
                     
                     let ticketId = '';
                     if (bodyMatches.length > 0) {
-                      ticketId = bodyMatches[0][1]; // First match from body
+                      ticketId = bodyMatches[0][1];
                     } else if (titleMatch) {
-                      ticketId = titleMatch[1]; // Fallback to title
+                      ticketId = titleMatch[1];
                     }
                     
                     releasePRs.push({
@@ -135,19 +196,48 @@ jobs:
                       mergedAt: pr.merged_at,
                       url: pr.html_url
                     });
+                    
+                    console.log(`    ✅ INCLUDED: PR#${pr.number} - ${pr.title.substring(0, 40)}...`);
                   }
                 }
                 
+                console.log(`  📊 Summary: ${mergedCount} merged, ${withLabelCount} with 'release' label, ${releasePRs.length} to include`);
+                debugInfo.push(`- Merged PRs: ${mergedCount}`);
+                debugInfo.push(`- PRs with 'release' label: ${withLabelCount}`);
+                debugInfo.push(`- PRs to include (merged + label): ${releasePRs.length}`);
+                
                 if (releasePRs.length > 0) {
                   allPRs[repo] = releasePRs;
+                  debugInfo.push(`- ✅ Added ${releasePRs.length} PRs to release notes`);
+                } else {
+                  debugInfo.push(`- ⚠️ No PRs matched criteria`);
                 }
                 
               } catch (error) {
-                console.error(`Error fetching PRs from ${repoFullName}: ${error.message}`);
+                console.error(`❌ Error fetching PRs from ${repoFullName}: ${error.message}`);
+                debugInfo.push(`- ❌ ERROR: ${error.message}`);
               }
             }
             
+            console.log('\n' + '='.repeat(50));
+            console.log('FINAL RESULT:', JSON.stringify(allPRs, null, 2));
+            console.log('='.repeat(50));
+            
+            // Set debug info as output for summary
+            core.setOutput('debug_info', debugInfo.join('\n'));
+            
             return allPRs;
+
+      - name: "🔍 DEBUG: Show collected PRs"
+        run: |
+          echo "## PR Collection Results" >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.collect.outputs.debug_info }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Raw PR Data (JSON)" >> $GITHUB_STEP_SUMMARY
+          echo '```json' >> $GITHUB_STEP_SUMMARY
+          echo '${{ steps.collect.outputs.result }}' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
 
       - name: Format release notes
         id: format
@@ -166,24 +256,28 @@ jobs:
               year: 'numeric' 
             }).replace(/\//g, '');
             
+            console.log('PR Data received:', JSON.stringify(prData, null, 2));
+            console.log('Number of repos with PRs:', Object.keys(prData).length);
+            
             // Format for Slack
             let slackMessage = `*🚀 Release Notes - ${dateStr}*\n\n`;
             
             // Format for Confluence (HTML)
             let confluenceHtml = `<h1>Release Notes - ${dateStr}</h1>`;
             
+            // Plain text for summary
+            let plainText = `Release Notes - ${dateStr}\n${'='.repeat(40)}\n\n`;
+            
             for (const [repo, prs] of Object.entries(prData)) {
-              // Slack format
               slackMessage += `*${repo}*\n`;
-              
-              // Confluence format
               confluenceHtml += `<h2>${repo}</h2><ul>`;
+              plainText += `${repo}\n${'-'.repeat(repo.length)}\n`;
               
               for (const pr of prs) {
                 const ticketLink = pr.ticketId ? `${jiraBase}/${pr.ticketId}` : '';
                 const ticketDisplay = pr.ticketId || 'No ticket';
                 
-                // Slack: {ticket_id} - {PR Title} - PR#xxxx - @author
+                // Slack format
                 if (pr.ticketId) {
                   slackMessage += `  • <${ticketLink}|${pr.ticketId}> - ${pr.title} - <${pr.url}|PR#${pr.number}> @${pr.author}\n`;
                 } else {
@@ -196,25 +290,58 @@ jobs:
                 } else {
                   confluenceHtml += `<li>${ticketDisplay} - ${pr.title} - <a href="${pr.url}">PR#${pr.number}</a> @${pr.author}</li>`;
                 }
+                
+                // Plain text
+                plainText += `  • ${ticketDisplay} - ${pr.title} - PR#${pr.number} @${pr.author}\n`;
               }
               
               slackMessage += '\n';
               confluenceHtml += '</ul>';
+              plainText += '\n';
             }
             
             // Check if we have any PRs
-            if (Object.keys(prData).length === 0) {
+            const hasPRs = Object.keys(prData).length > 0;
+            if (!hasPRs) {
               slackMessage = `*🚀 Release Notes - ${dateStr}*\n\nNo PRs with 'release' label found.`;
               confluenceHtml = `<h1>Release Notes - ${dateStr}</h1><p>No PRs with 'release' label found.</p>`;
+              plainText = `Release Notes - ${dateStr}\n\nNo PRs with 'release' label found.`;
             }
+            
+            console.log('Has PRs:', hasPRs);
+            console.log('Plain text output:\n', plainText);
             
             core.setOutput('slack_message', slackMessage);
             core.setOutput('confluence_html', confluenceHtml);
+            core.setOutput('plain_text', plainText);
             core.setOutput('date_title', dateStr);
-            core.setOutput('has_prs', Object.keys(prData).length > 0);
+            core.setOutput('has_prs', hasPRs.toString());
+
+      - name: "📋 PREVIEW: Release Notes"
+        run: |
+          echo "## 📋 Release Notes Preview" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Plain Text Format" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat << 'EOF' >> $GITHUB_STEP_SUMMARY
+          ${{ steps.format.outputs.plain_text }}
+          EOF
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Has PRs: ${{ steps.format.outputs.has_prs }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: "🚫 DRY RUN: Skip posting"
+        if: github.event.inputs.dry_run == 'true'
+        run: |
+          echo "## ⚠️ DRY RUN MODE" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Skipping Slack and Confluence posting because dry_run is enabled." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "To actually post, run the workflow again with 'Dry run' unchecked." >> $GITHUB_STEP_SUMMARY
 
       - name: Post to Slack
-        if: steps.format.outputs.has_prs == 'true'
+        if: steps.format.outputs.has_prs == 'true' && github.event.inputs.dry_run != 'true'
         uses: slackapi/slack-github-action@v1.26.0
         with:
           channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
@@ -223,15 +350,11 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
       - name: Create Confluence page
-        if: steps.format.outputs.has_prs == 'true'
+        if: steps.format.outputs.has_prs == 'true' && github.event.inputs.dry_run != 'true'
         run: |
-          # Create new page under Release Notes space
           DATE_TITLE="${{ steps.format.outputs.date_title }}"
-          
-          # Escape the HTML content for JSON
           CONTENT=$(echo '${{ steps.format.outputs.confluence_html }}' | jq -Rs .)
           
-          # Create the page
           curl -X POST \
             "${{ env.CONFLUENCE_BASE_URL }}/rest/api/content" \
             -H "Authorization: Basic ${{ secrets.CONFLUENCE_API_TOKEN }}" \
@@ -250,7 +373,7 @@ jobs:
             }"
 
       - name: Remove release labels from processed PRs
-        if: steps.format.outputs.has_prs == 'true'
+        if: steps.format.outputs.has_prs == 'true' && github.event.inputs.dry_run != 'true'
         uses: actions/github-script@v7
         env:
           PR_DATA: ${{ steps.collect.outputs.result }}
@@ -260,7 +383,7 @@ jobs:
             const prData = JSON.parse(process.env.PR_DATA);
             
             for (const [repo, prs] of Object.entries(prData)) {
-              const owner = context.repo.owner; // Assumes same org
+              const owner = context.repo.owner;
               
               for (const pr of prs) {
                 try {
@@ -277,13 +400,24 @@ jobs:
               }
             }
 
-      - name: Summary
+      - name: "✅ Summary"
         run: |
-          echo "## Release Notes Generated! 🚀" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Date:** ${{ steps.format.outputs.date_title }}" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "## ✅ Workflow Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Actions completed:**" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Posted to Slack" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Created Confluence page" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Removed 'release' labels from processed PRs" >> $GITHUB_STEP_SUMMARY
+          echo "| Action | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|--------|" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ github.event.inputs.dry_run }}" == "true" ]]; then
+            echo "| Slack | ⏭️ Skipped (dry run) |" >> $GITHUB_STEP_SUMMARY
+            echo "| Confluence | ⏭️ Skipped (dry run) |" >> $GITHUB_STEP_SUMMARY
+            echo "| Remove labels | ⏭️ Skipped (dry run) |" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ steps.format.outputs.has_prs }}" == "true" ]]; then
+            echo "| Slack | ✅ Posted |" >> $GITHUB_STEP_SUMMARY
+            echo "| Confluence | ✅ Created |" >> $GITHUB_STEP_SUMMARY
+            echo "| Remove labels | ✅ Done |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Slack | ⏭️ Skipped (no PRs) |" >> $GITHUB_STEP_SUMMARY
+            echo "| Confluence | ⏭️ Skipped (no PRs) |" >> $GITHUB_STEP_SUMMARY
+            echo "| Remove labels | ⏭️ Skipped (no PRs) |" >> $GITHUB_STEP_SUMMARY
+          fi
