@@ -374,6 +374,7 @@ jobs:
 
       - name: Remove release labels from processed PRs
         if: steps.format.outputs.has_prs == 'true' && github.event.inputs.dry_run != 'true'
+        id: remove_labels
         uses: actions/github-script@v7
         env:
           PR_DATA: ${{ steps.collect.outputs.result }}
@@ -384,6 +385,12 @@ jobs:
             const prData = JSON.parse(process.env.PR_DATA);
             const reposToCheck = process.env.REPOS_TO_CHECK.split(',').map(r => r.trim()).filter(r => r);
             
+            console.log('='.repeat(50));
+            console.log('REMOVE LABELS - DEBUG INFO');
+            console.log('='.repeat(50));
+            console.log('PR Data:', JSON.stringify(prData, null, 2));
+            console.log('Repos to check:', reposToCheck);
+            
             // Build a map of repo name -> owner
             const repoOwnerMap = {};
             for (const repoFullName of reposToCheck) {
@@ -393,32 +400,53 @@ jobs:
               }
             }
             
-            console.log('Repo owner map:', repoOwnerMap);
+            console.log('Repo owner map:', JSON.stringify(repoOwnerMap, null, 2));
+            
+            const results = [];
             
             for (const [repo, prs] of Object.entries(prData)) {
               const owner = repoOwnerMap[repo];
               
               if (!owner) {
                 console.log(`❌ Could not find owner for repo: ${repo}`);
+                results.push(`❌ ${repo}: owner not found`);
                 continue;
               }
               
               console.log(`\n📦 Removing labels from ${owner}/${repo}...`);
               
               for (const pr of prs) {
+                console.log(`  Attempting to remove 'release' label from PR#${pr.number}...`);
+                console.log(`    URL: https://github.com/${owner}/${repo}/pull/${pr.number}`);
+                
                 try {
-                  await github.rest.issues.removeLabel({
+                  const response = await github.rest.issues.removeLabel({
                     owner,
                     repo,
                     issue_number: pr.number,
                     name: 'release'
                   });
-                  console.log(`  ✅ Removed 'release' label from PR#${pr.number}`);
+                  console.log(`  ✅ Success! Status: ${response.status}`);
+                  results.push(`✅ ${repo}#${pr.number}: label removed`);
                 } catch (error) {
-                  console.log(`  ❌ Could not remove label from PR#${pr.number}: ${error.message}`);
+                  console.log(`  ❌ Failed! Error: ${error.message}`);
+                  console.log(`    Status: ${error.status}`);
+                  console.log(`    Full error:`, JSON.stringify(error, null, 2));
+                  results.push(`❌ ${repo}#${pr.number}: ${error.message}`);
                 }
               }
             }
+            
+            core.setOutput('results', results.join('\n'));
+
+      - name: "🏷️ Label Removal Results"
+        if: steps.format.outputs.has_prs == 'true'
+        run: |
+          echo "## 🏷️ Label Removal Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.remove_labels.outputs.results }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: "✅ Summary"
         run: |
