@@ -388,7 +388,7 @@ jobs:
             -d "{
               \"type\": \"page\",
               \"title\": \"${DATE_TITLE}\",
-              \"ancestors\": [{\"id\": \"${{ env.CONFLUENCE_PARENT_PAGE_ID }}\"}],
+              # \"ancestors\": [{\"id\": \"${{ env.CONFLUENCE_PARENT_PAGE_ID }}\"}],
               \"space\": {\"key\": \"${{ env.CONFLUENCE_SPACE_KEY }}\"},
               \"body\": {
                 \"storage\": {
