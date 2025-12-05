@@ -25,7 +25,6 @@ on:
 env:
   CONFLUENCE_BASE_URL: https://boompay.atlassian.net/wiki
   CONFLUENCE_SPACE_KEY: RN
-  CONFLUENCE_PARENT_PAGE_ID: '48562454'
   JIRA_BASE_URL: https://boompay.atlassian.net/browse
   
   # List of all repositories to check
@@ -357,6 +356,56 @@ jobs:
           echo "### Has PRs: ${{ steps.format.outputs.has_prs }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
+      - name: "📋 Copy-Paste Ready Format (for manual Confluence posting)"
+        if: steps.format.outputs.has_prs == 'true'
+        uses: actions/github-script@v7
+        env:
+          PR_DATA: ${{ steps.collect.outputs.result }}
+          JIRA_BASE: ${{ env.JIRA_BASE_URL }}
+          DATE_TITLE: ${{ steps.format.outputs.date_title }}
+        with:
+          script: |
+            const prData = JSON.parse(process.env.PR_DATA);
+            const jiraBase = process.env.JIRA_BASE;
+            const dateTitle = process.env.DATE_TITLE;
+            
+            let markdown = `# Release Notes - ${dateTitle}\n\n`;
+            
+            for (const [repo, prs] of Object.entries(prData)) {
+              markdown += `## ${repo}\n\n`;
+              
+              for (const pr of prs) {
+                const ticketLink = pr.ticketId ? `${jiraBase}/${pr.ticketId}` : '';
+                const ticketDisplay = pr.ticketId || 'No ticket';
+                
+                if (pr.ticketId) {
+                  markdown += `- [${pr.ticketId}](${ticketLink}) - ${pr.title} - [PR#${pr.number}](${pr.url}) By: @${pr.author}\n`;
+                } else {
+                  markdown += `- ${ticketDisplay} - ${pr.title} - [PR#${pr.number}](${pr.url}) By: @${pr.author}\n`;
+                }
+              }
+              
+              markdown += '\n';
+            }
+            
+            // Output to step summary for easy copy-paste
+            const fs = require('fs');
+            const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+            
+            fs.appendFileSync(summaryPath, '## 📋 Copy-Paste Ready Format\n\n');
+            fs.appendFileSync(summaryPath, '**Use this if Confluence push fails - copy the content below:**\n\n');
+            fs.appendFileSync(summaryPath, '<details>\n<summary>Click to expand and copy</summary>\n\n');
+            fs.appendFileSync(summaryPath, '```markdown\n');
+            fs.appendFileSync(summaryPath, markdown);
+            fs.appendFileSync(summaryPath, '\n```\n\n');
+            fs.appendFileSync(summaryPath, '</details>\n\n');
+            
+            // Also output as a code block for easy selection
+            fs.appendFileSync(summaryPath, '### Formatted Text (ready for Confluence):\n\n');
+            fs.appendFileSync(summaryPath, '<pre style="background: #f4f4f4; padding: 10px; border-radius: 5px; overflow-x: auto;">\n');
+            fs.appendFileSync(summaryPath, markdown.replace(/</g, '&lt;').replace(/>/g, '&gt;'));
+            fs.appendFileSync(summaryPath, '\n</pre>\n\n');
+
       - name: "🚫 DRY RUN: Skip posting"
         if: github.event.inputs.dry_run == 'true'
         run: |
@@ -366,17 +415,10 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "To actually post, run the workflow again with 'Dry run' unchecked." >> $GITHUB_STEP_SUMMARY
 
-      - name: Post to Slack
-        if: steps.format.outputs.has_prs == 'true' && github.event.inputs.dry_run != 'true'
-        uses: slackapi/slack-github-action@v1.26.0
-        with:
-          channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
-          slack-message: ${{ steps.format.outputs.slack_message }}
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-
       - name: Create Confluence page
         if: steps.format.outputs.has_prs == 'true' && github.event.inputs.dry_run != 'true'
+        id: confluence
+        continue-on-error: true
         run: |
           DATE_TITLE="${{ steps.format.outputs.date_title }}"
           CONTENT=$(echo '${{ steps.format.outputs.confluence_html }}' | jq -Rs .)
@@ -420,12 +462,22 @@ jobs:
           
           if [ "${HTTP_CODE}" -ge 200 ] && [ "${HTTP_CODE}" -lt 300 ]; then
             echo "✅ Successfully created Confluence page!" >> $GITHUB_STEP_SUMMARY
-            PAGE_URL=$(echo "$RESPONSE_BODY" | jq -r '._links.webui // empty')
-            if [ -n "$PAGE_URL" ]; then
-              echo "Page URL: ${PAGE_URL}" >> $GITHUB_STEP_SUMMARY
+            PAGE_RELATIVE_URL=$(echo "$RESPONSE_BODY" | jq -r '._links.webui // empty')
+            if [ -n "$PAGE_RELATIVE_URL" ]; then
+              # Construct full URL
+              FULL_PAGE_URL="${{ env.CONFLUENCE_BASE_URL }}$PAGE_RELATIVE_URL"
+              echo "Page URL: ${FULL_PAGE_URL}" >> $GITHUB_STEP_SUMMARY
+              echo "page_url=${FULL_PAGE_URL}" >> $GITHUB_OUTPUT
+              echo "success=true" >> $GITHUB_OUTPUT
+            else
+              echo "⚠️ Warning: Could not extract page URL from response" >> $GITHUB_STEP_SUMMARY
+              echo "page_url=" >> $GITHUB_OUTPUT
+              echo "success=false" >> $GITHUB_OUTPUT
             fi
           else
             echo "❌ Failed to create Confluence page" >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ **Workflow will continue - Slack will still be posted**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
             echo "Response body:" >> $GITHUB_STEP_SUMMARY
             echo '```json' >> $GITHUB_STEP_SUMMARY
             echo "$RESPONSE_BODY" | jq '.' >> $GITHUB_STEP_SUMMARY 2>&1 || echo "$RESPONSE_BODY" >> $GITHUB_STEP_SUMMARY
@@ -435,8 +487,50 @@ jobs:
             echo "- Check that CONFLUENCE_API_TOKEN is base64 encoded email:token" >> $GITHUB_STEP_SUMMARY
             echo "- Check that the space key is correct" >> $GITHUB_STEP_SUMMARY
             echo "- Verify you have permission to create pages in this space" >> $GITHUB_STEP_SUMMARY
-            exit 1
+            echo "page_url=" >> $GITHUB_OUTPUT
+            echo "success=false" >> $GITHUB_OUTPUT
           fi
+
+      - name: Update Slack message with Confluence link
+        if: steps.format.outputs.has_prs == 'true' && github.event.inputs.dry_run != 'true'
+        id: update_slack
+        run: |
+          ORIGINAL_MESSAGE='${{ steps.format.outputs.slack_message }}'
+          CONFLUENCE_URL="${{ steps.confluence.outputs.page_url }}"
+          CONFLUENCE_SUCCESS="${{ steps.confluence.outputs.success }}"
+          DATE_TITLE="${{ steps.format.outputs.date_title }}"
+          
+          # Check if Confluence was successful and URL is available
+          if [ -n "$CONFLUENCE_URL" ] && [ "$CONFLUENCE_SUCCESS" == "true" ]; then
+            # Replace the date in the title with a hyperlinked version
+            # Use # as sed delimiter to avoid conflicts with | in Slack link format
+            UPDATED_MESSAGE=$(echo "$ORIGINAL_MESSAGE" | sed "s#\*🚀 Release Notes - ${DATE_TITLE}\*#*🚀 Release Notes - <${CONFLUENCE_URL}|${DATE_TITLE}>*#")
+            echo "slack_message<<EOF" >> $GITHUB_OUTPUT
+            echo "$UPDATED_MESSAGE" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            echo "✅ Updated Slack message with Confluence link" >> $GITHUB_STEP_SUMMARY
+            echo "Confluence URL: ${CONFLUENCE_URL}" >> $GITHUB_STEP_SUMMARY
+          else
+            # No Confluence URL or Confluence failed, use original message
+            echo "slack_message<<EOF" >> $GITHUB_OUTPUT
+            echo "$ORIGINAL_MESSAGE" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            if [ "$CONFLUENCE_SUCCESS" == "false" ]; then
+              echo "⚠️ Confluence page creation failed - Slack will be posted without Confluence link" >> $GITHUB_STEP_SUMMARY
+              echo "💡 Check the 'Copy-Paste Ready Format' section above to manually create the Confluence page" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "⚠️ No Confluence URL available, using original message" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+
+      - name: Post to Slack
+        if: steps.format.outputs.has_prs == 'true' && github.event.inputs.dry_run != 'true'
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
+          slack-message: ${{ steps.update_slack.outputs.slack_message }}
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
       - name: "🔍 DEBUG: Check conditions before label removal"
         run: |
@@ -568,6 +662,7 @@ jobs:
           fi
 
       - name: "✅ Summary"
+        if: always()
         run: |
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "---" >> $GITHUB_STEP_SUMMARY
@@ -581,7 +676,14 @@ jobs:
             echo "| Remove labels | ⏭️ Skipped (dry run) |" >> $GITHUB_STEP_SUMMARY
           elif [[ "${{ steps.format.outputs.has_prs }}" == "true" ]]; then
             echo "| Slack | ✅ Posted |" >> $GITHUB_STEP_SUMMARY
-            echo "| Confluence | ✅ Created |" >> $GITHUB_STEP_SUMMARY
+            CONFLUENCE_SUCCESS="${{ steps.confluence.outputs.success }}"
+            if [[ "$CONFLUENCE_SUCCESS" == "true" ]]; then
+              echo "| Confluence | ✅ Created |" >> $GITHUB_STEP_SUMMARY
+            elif [[ -n "${{ steps.confluence.outputs.page_url }}" ]]; then
+              echo "| Confluence | ⚠️ Created (URL extraction failed) |" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "| Confluence | ❌ Failed (see copy-paste format above) |" >> $GITHUB_STEP_SUMMARY
+            fi
             echo "| Remove labels | ✅ Done |" >> $GITHUB_STEP_SUMMARY
           else
             echo "| Slack | ⏭️ Skipped (no PRs) |" >> $GITHUB_STEP_SUMMARY
