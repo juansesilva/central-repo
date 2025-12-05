@@ -29,10 +29,10 @@ env:
   JIRA_BASE_URL: https://boompay.atlassian.net/browse
   
   # List of all repositories to check
-  # ⚠️ UPDATE THESE WITH YOUR ACTUAL ORG/REPO NAMES
+  # ⚠️ UPDATE THESE WITH YOUR ACTUAL REPO NAMES (owner will be auto-detected)
   ALL_REPOS: |
-    juansesilva/hack-repo1
-    juansesilva/hack-repo2
+    hack-repo1
+    hack-repo2
 
 jobs:
   generate-release-notes:
@@ -110,16 +110,29 @@ jobs:
             console.log('REPOS TO CHECK:', repos);
             console.log('='.repeat(50));
             
+            // Get default owner from GitHub context
+            const defaultOwner = context.repo.owner;
+            
             for (const repoFullName of repos) {
-              const [owner, repo] = repoFullName.split('/');
-              console.log(`\n📦 Checking ${owner}/${repo}...`);
-              debugInfo.push(`\n### ${owner}/${repo}`);
+              let owner, repo;
+              
+              // Check if repo includes owner (format: owner/repo) or just repo name
+              if (repoFullName.includes('/')) {
+                [owner, repo] = repoFullName.split('/');
+              } else {
+                // Just repo name provided, use default owner
+                owner = defaultOwner;
+                repo = repoFullName;
+              }
               
               if (!owner || !repo) {
                 console.log(`❌ Invalid repo format: ${repoFullName}`);
                 debugInfo.push(`❌ Invalid repo format: ${repoFullName}`);
                 continue;
               }
+              
+              console.log(`\n📦 Checking ${owner}/${repo}...`);
+              debugInfo.push(`\n### ${owner}/${repo}`);
               
               try {
                 // Get merged PRs from both master and main branches
@@ -417,9 +430,20 @@ jobs:
             console.log('Repos to check:', reposToCheck);
             
             // Build a map of repo name -> owner
+            const defaultOwner = context.repo.owner;
             const repoOwnerMap = {};
             for (const repoFullName of reposToCheck) {
-              const [owner, repo] = repoFullName.split('/');
+              let owner, repo;
+              
+              // Check if repo includes owner (format: owner/repo) or just repo name
+              if (repoFullName.includes('/')) {
+                [owner, repo] = repoFullName.split('/');
+              } else {
+                // Just repo name provided, use default owner
+                owner = defaultOwner;
+                repo = repoFullName;
+              }
+              
               if (owner && repo) {
                 repoOwnerMap[repo] = owner;
               }
