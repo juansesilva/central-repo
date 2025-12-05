@@ -291,6 +291,15 @@ jobs:
             const jiraBase = process.env.JIRA_BASE;
             const releaseName = process.env.RELEASE_NAME;
             
+            // Repository name aliases mapping
+            const repoAliases = {
+              'hack-repo1': 'PX',
+              'hack-repo2': 'AX'
+            };
+            
+            // Helper function to get display name (alias or original)
+            const getDisplayName = (repo) => repoAliases[repo] || repo;
+            
             console.log('PR Data received:', JSON.stringify(prData, null, 2));
             console.log('Number of repos with PRs:', Object.keys(prData).length);
             console.log('Release name:', releaseName);
@@ -311,9 +320,10 @@ jobs:
               
               // Loop through repos and add their PRs
               for (const [repo, prs] of Object.entries(prData)) {
-                slackMessage += `*${repo}*\n`;
-                confluenceHtml += `<h2>${repo}</h2><ul>`;
-                plainText += `${repo}\n${'-'.repeat(repo.length)}\n`;
+                const displayName = getDisplayName(repo);
+                slackMessage += `*${displayName}*\n`;
+                confluenceHtml += `<h2>${displayName}</h2><ul>`;
+                plainText += `${displayName}\n${'-'.repeat(displayName.length)}\n`;
                 
                 for (const pr of prs) {
                   const ticketLink = pr.ticketId ? `${jiraBase}/${pr.ticketId}` : '';
@@ -384,10 +394,20 @@ jobs:
             const jiraBase = process.env.JIRA_BASE;
             const releaseName = process.env.RELEASE_NAME;
             
+            // Repository name aliases mapping
+            const repoAliases = {
+              'hack-repo1': 'PX',
+              'hack-repo2': 'AX'
+            };
+            
+            // Helper function to get display name (alias or original)
+            const getDisplayName = (repo) => repoAliases[repo] || repo;
+            
             let markdown = `# Release Notes - ${releaseName}\n\n`;
             
             for (const [repo, prs] of Object.entries(prData)) {
-              markdown += `## ${repo}\n\n`;
+              const displayName = getDisplayName(repo);
+              markdown += `## ${displayName}\n\n`;
               
               for (const pr of prs) {
                 const ticketLink = pr.ticketId ? `${jiraBase}/${pr.ticketId}` : '';
@@ -446,7 +466,7 @@ jobs:
           # Build JSON payload (without ancestors - creating top-level page)
           JSON_PAYLOAD=$(jq -n \
             --arg type "page" \
-            --arg title "Release Notes - ${RELEASE_NAME}" \
+            --arg title "${RELEASE_NAME}" \
             --arg space_key "${{ env.CONFLUENCE_SPACE_KEY }}" \
             --argjson content "${CONTENT}" \
             '{
