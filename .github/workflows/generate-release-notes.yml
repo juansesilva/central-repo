@@ -381,22 +381,62 @@ jobs:
           DATE_TITLE="${{ steps.format.outputs.date_title }}"
           CONTENT=$(echo '${{ steps.format.outputs.confluence_html }}' | jq -Rs .)
           
-          curl -X POST \
+          echo "🔍 DEBUG: Creating Confluence page..." >> $GITHUB_STEP_SUMMARY
+          echo "Title: ${DATE_TITLE}" >> $GITHUB_STEP_SUMMARY
+          echo "Space: ${{ env.CONFLUENCE_SPACE_KEY }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Build JSON payload (without ancestors - creating top-level page)
+          JSON_PAYLOAD=$(jq -n \
+            --arg type "page" \
+            --arg title "${DATE_TITLE}" \
+            --arg space_key "${{ env.CONFLUENCE_SPACE_KEY }}" \
+            --argjson content "${CONTENT}" \
+            '{
+              "type": $type,
+              "title": $title,
+              "space": {"key": $space_key},
+              "body": {
+                "storage": {
+                  "value": $content,
+                  "representation": "storage"
+                }
+              }
+            }')
+          
+          echo "📤 Sending request to Confluence..." >> $GITHUB_STEP_SUMMARY
+          
+          # Make the API call with error handling
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
             "${{ env.CONFLUENCE_BASE_URL }}/rest/api/content" \
             -H "Authorization: Basic ${{ secrets.CONFLUENCE_API_TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d "{
-              \"type\": \"page\",
-              \"title\": \"${DATE_TITLE}\",
-              # \"ancestors\": [{\"id\": \"${{ env.CONFLUENCE_PARENT_PAGE_ID }}\"}],
-              \"space\": {\"key\": \"${{ env.CONFLUENCE_SPACE_KEY }}\"},
-              \"body\": {
-                \"storage\": {
-                  \"value\": ${CONTENT},
-                  \"representation\": \"storage\"
-                }
-              }
-            }"
+            -d "${JSON_PAYLOAD}")
+          
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          RESPONSE_BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          echo "HTTP Status Code: ${HTTP_CODE}" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${HTTP_CODE}" -ge 200 ] && [ "${HTTP_CODE}" -lt 300 ]; then
+            echo "✅ Successfully created Confluence page!" >> $GITHUB_STEP_SUMMARY
+            PAGE_URL=$(echo "$RESPONSE_BODY" | jq -r '._links.webui // empty')
+            if [ -n "$PAGE_URL" ]; then
+              echo "Page URL: ${PAGE_URL}" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "❌ Failed to create Confluence page" >> $GITHUB_STEP_SUMMARY
+            echo "Response body:" >> $GITHUB_STEP_SUMMARY
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            echo "$RESPONSE_BODY" | jq '.' >> $GITHUB_STEP_SUMMARY 2>&1 || echo "$RESPONSE_BODY" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Common issues:" >> $GITHUB_STEP_SUMMARY
+            echo "- Check that CONFLUENCE_API_TOKEN is base64 encoded email:token" >> $GITHUB_STEP_SUMMARY
+            echo "- Check that the space key is correct" >> $GITHUB_STEP_SUMMARY
+            echo "- Verify you have permission to create pages in this space" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
 
       - name: "🔍 DEBUG: Check conditions before label removal"
         run: |
