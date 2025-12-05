@@ -9,9 +9,9 @@ on:
   workflow_dispatch:
     inputs:
       release_name:
-        description: 'Release name (e.g., Weekly Release, Hotfix)'
+        description: 'Release name (e.g., Weekly Release, Hotfix). Leave empty to use today''s date (ddmmyyyy)'
         required: false
-        default: 'Weekly Release'
+        default: ''
       repos:
         description: 'Repos to include (comma-separated, or "all")'
         required: false
@@ -91,6 +91,24 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "${{ steps.repos.outputs.repos }}" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: Determine release name
+        id: release_name
+        run: |
+          INPUT_RELEASE_NAME="${{ github.event.inputs.release_name }}"
+          
+          if [[ -n "$INPUT_RELEASE_NAME" ]]; then
+            # Use the provided release name
+            RELEASE_NAME="$INPUT_RELEASE_NAME"
+            echo "Using provided release name: $RELEASE_NAME" >> $GITHUB_STEP_SUMMARY
+          else
+            # Default to today's date in ddmmyyyy format
+            RELEASE_NAME=$(date +%d%m%Y)
+            echo "Using default release name (today's date): $RELEASE_NAME" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "release_name=$RELEASE_NAME" >> $GITHUB_OUTPUT
           echo "" >> $GITHUB_STEP_SUMMARY
 
       - name: Collect PRs from all repositories
@@ -266,19 +284,16 @@ jobs:
         env:
           PR_DATA: ${{ steps.collect.outputs.result }}
           JIRA_BASE: ${{ env.JIRA_BASE_URL }}
+          RELEASE_NAME: ${{ steps.release_name.outputs.release_name }}
         with:
           script: |
             const prData = JSON.parse(process.env.PR_DATA);
             const jiraBase = process.env.JIRA_BASE;
-            const today = new Date();
-            const dateStr = today.toLocaleDateString('en-GB', { 
-              day: '2-digit', 
-              month: '2-digit', 
-              year: 'numeric' 
-            }).replace(/\//g, '');
+            const releaseName = process.env.RELEASE_NAME;
             
             console.log('PR Data received:', JSON.stringify(prData, null, 2));
             console.log('Number of repos with PRs:', Object.keys(prData).length);
+            console.log('Release name:', releaseName);
             
             // Check if we have any PRs
             const hasPRs = Object.keys(prData).length > 0;
@@ -290,9 +305,9 @@ jobs:
             
             if (hasPRs) {
               // Add header only once at the beginning if there are PRs
-              slackMessage = `*🚀 Release Notes - ${dateStr}*\n\n`;
-              confluenceHtml = `<h1>Release Notes - ${dateStr}</h1>`;
-              plainText = `Release Notes - ${dateStr}\n${'='.repeat(40)}\n\n`;
+              slackMessage = `*🚀 Release Notes - ${releaseName}*\n\n`;
+              confluenceHtml = `<h1>Release Notes - ${releaseName}</h1>`;
+              plainText = `Release Notes - ${releaseName}\n${'='.repeat(40)}\n\n`;
               
               // Loop through repos and add their PRs
               for (const [repo, prs] of Object.entries(prData)) {
@@ -328,9 +343,9 @@ jobs:
               }
             } else {
               // No PRs found
-              slackMessage = `*🚀 Release Notes - ${dateStr}*\n\nNo PRs with 'release' or 'release_if_approved' label found (merged in last 48 hours).`;
-              confluenceHtml = `<h1>Release Notes - ${dateStr}</h1><p>No PRs with 'release' or 'release_if_approved' label found (merged in last 48 hours).</p>`;
-              plainText = `Release Notes - ${dateStr}\n\nNo PRs with 'release' or 'release_if_approved' label found (merged in last 48 hours).`;
+              slackMessage = `*🚀 Release Notes - ${releaseName}*\n\nNo PRs with 'release' or 'release_if_approved' label found (merged in last 48 hours).`;
+              confluenceHtml = `<h1>Release Notes - ${releaseName}</h1><p>No PRs with 'release' or 'release_if_approved' label found (merged in last 48 hours).</p>`;
+              plainText = `Release Notes - ${releaseName}\n\nNo PRs with 'release' or 'release_if_approved' label found (merged in last 48 hours).`;
             }
             
             console.log('Has PRs:', hasPRs);
@@ -339,7 +354,7 @@ jobs:
             core.setOutput('slack_message', slackMessage);
             core.setOutput('confluence_html', confluenceHtml);
             core.setOutput('plain_text', plainText);
-            core.setOutput('date_title', dateStr);
+            core.setOutput('date_title', releaseName);
             core.setOutput('has_prs', hasPRs.toString());
 
       - name: "📋 PREVIEW: Release Notes"
@@ -362,14 +377,14 @@ jobs:
         env:
           PR_DATA: ${{ steps.collect.outputs.result }}
           JIRA_BASE: ${{ env.JIRA_BASE_URL }}
-          DATE_TITLE: ${{ steps.format.outputs.date_title }}
+          RELEASE_NAME: ${{ steps.release_name.outputs.release_name }}
         with:
           script: |
             const prData = JSON.parse(process.env.PR_DATA);
             const jiraBase = process.env.JIRA_BASE;
-            const dateTitle = process.env.DATE_TITLE;
+            const releaseName = process.env.RELEASE_NAME;
             
-            let markdown = `# Release Notes - ${dateTitle}\n\n`;
+            let markdown = `# Release Notes - ${releaseName}\n\n`;
             
             for (const [repo, prs] of Object.entries(prData)) {
               markdown += `## ${repo}\n\n`;
@@ -420,18 +435,18 @@ jobs:
         id: confluence
         continue-on-error: true
         run: |
-          DATE_TITLE="${{ steps.format.outputs.date_title }}"
+          RELEASE_NAME="${{ steps.release_name.outputs.release_name }}"
           CONTENT=$(echo '${{ steps.format.outputs.confluence_html }}' | jq -Rs .)
           
           echo "🔍 DEBUG: Creating Confluence page..." >> $GITHUB_STEP_SUMMARY
-          echo "Title: ${DATE_TITLE}" >> $GITHUB_STEP_SUMMARY
+          echo "Title: Release Notes - ${RELEASE_NAME}" >> $GITHUB_STEP_SUMMARY
           echo "Space: ${{ env.CONFLUENCE_SPACE_KEY }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           # Build JSON payload (without ancestors - creating top-level page)
           JSON_PAYLOAD=$(jq -n \
             --arg type "page" \
-            --arg title "${DATE_TITLE}" \
+            --arg title "Release Notes - ${RELEASE_NAME}" \
             --arg space_key "${{ env.CONFLUENCE_SPACE_KEY }}" \
             --argjson content "${CONTENT}" \
             '{
@@ -498,13 +513,13 @@ jobs:
           ORIGINAL_MESSAGE='${{ steps.format.outputs.slack_message }}'
           CONFLUENCE_URL="${{ steps.confluence.outputs.page_url }}"
           CONFLUENCE_SUCCESS="${{ steps.confluence.outputs.success }}"
-          DATE_TITLE="${{ steps.format.outputs.date_title }}"
+          RELEASE_NAME="${{ steps.release_name.outputs.release_name }}"
           
           # Check if Confluence was successful and URL is available
           if [ -n "$CONFLUENCE_URL" ] && [ "$CONFLUENCE_SUCCESS" == "true" ]; then
-            # Replace the date in the title with a hyperlinked version
+            # Replace the release name in the title with a hyperlinked version
             # Use # as sed delimiter to avoid conflicts with | in Slack link format
-            UPDATED_MESSAGE=$(echo "$ORIGINAL_MESSAGE" | sed "s#\*🚀 Release Notes - ${DATE_TITLE}\*#*🚀 Release Notes - <${CONFLUENCE_URL}|${DATE_TITLE}>*#")
+            UPDATED_MESSAGE=$(echo "$ORIGINAL_MESSAGE" | sed "s#\*🚀 Release Notes - ${RELEASE_NAME}\*#*🚀 Release Notes - <${CONFLUENCE_URL}|${RELEASE_NAME}>*#")
             echo "slack_message<<EOF" >> $GITHUB_OUTPUT
             echo "$UPDATED_MESSAGE" >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
