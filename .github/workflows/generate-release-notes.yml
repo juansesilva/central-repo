@@ -159,20 +159,29 @@ jobs:
                 let mergedCount = 0;
                 let withLabelCount = 0;
                 
+                // Calculate 48 hours ago timestamp
+                const now = new Date();
+                const fortyEightHoursAgo = new Date(now.getTime() - (48 * 60 * 60 * 1000));
+                
                 for (const pr of prsData) {
                   const isMerged = !!pr.merged_at;
                   const labels = pr.labels.map(l => l.name.toLowerCase());
-                  const hasReleaseLabel = labels.includes('release');
+                  const hasReleaseLabel = labels.includes('release') || labels.includes('release_if_approved');
+                  
+                  // Check if PR was merged in the last 48 hours
+                  let mergedInLast48Hours = false;
+                  if (isMerged && pr.merged_at) {
+                    const mergedAt = new Date(pr.merged_at);
+                    mergedInLast48Hours = mergedAt >= fortyEightHoursAgo;
+                  }
                   
                   if (isMerged) mergedCount++;
                   if (hasReleaseLabel) withLabelCount++;
                   
-                  // Log first 5 PRs for debugging
-                  if (prsData.indexOf(pr) < 5) {
-                    console.log(`    PR#${pr.number}: "${pr.title.substring(0, 50)}..." | merged: ${isMerged} | labels: [${labels.join(', ')}]`);
-                  }
+                  // Log all PRs for debugging
+                  console.log(`    PR#${pr.number}: "${pr.title.substring(0, 50)}..." | merged: ${isMerged} | merged_in_48h: ${mergedInLast48Hours} | labels: [${labels.join(', ')}]`);
                   
-                  if (hasReleaseLabel && isMerged) {
+                  if (hasReleaseLabel && isMerged && mergedInLast48Hours) {
                     // Extract JIRA ticket from PR body
                     const jiraPattern = /https:\/\/boompay\.atlassian\.net\/browse\/([A-Z]+-\d+)/g;
                     const bodyMatches = pr.body ? [...pr.body.matchAll(jiraPattern)] : [];
@@ -201,10 +210,10 @@ jobs:
                   }
                 }
                 
-                console.log(`  📊 Summary: ${mergedCount} merged, ${withLabelCount} with 'release' label, ${releasePRs.length} to include`);
+                console.log(`  📊 Summary: ${mergedCount} merged, ${withLabelCount} with 'release'/'release_if_approved' label, ${releasePRs.length} to include (merged in last 48h)`);
                 debugInfo.push(`- Merged PRs: ${mergedCount}`);
-                debugInfo.push(`- PRs with 'release' label: ${withLabelCount}`);
-                debugInfo.push(`- PRs to include (merged + label): ${releasePRs.length}`);
+                debugInfo.push(`- PRs with 'release' or 'release_if_approved' label: ${withLabelCount}`);
+                debugInfo.push(`- PRs to include (merged + label + last 48h): ${releasePRs.length}`);
                 
                 if (releasePRs.length > 0) {
                   allPRs[repo] = releasePRs;
@@ -292,13 +301,13 @@ jobs:
                   
                   // Confluence HTML
                   if (pr.ticketId) {
-                    confluenceHtml += `<li><a href="${ticketLink}">${pr.ticketId}</a> - ${pr.title} - <a href="${pr.url}">PR#${pr.number}</a> @${pr.author}</li>`;
+                    confluenceHtml += `<li><a href="${ticketLink}">${pr.ticketId}</a> - ${pr.title} - <a href="${pr.url}">PR#${pr.number}</a> By: @${pr.author}</li>`;
                   } else {
-                    confluenceHtml += `<li>${ticketDisplay} - ${pr.title} - <a href="${pr.url}">PR#${pr.number}</a> @${pr.author}</li>`;
+                    confluenceHtml += `<li>${ticketDisplay} - ${pr.title} - <a href="${pr.url}">PR#${pr.number}</a> By: @${pr.author}</li>`;
                   }
                   
                   // Plain text
-                  plainText += `  • ${ticketDisplay} - ${pr.title} - PR#${pr.number} @${pr.author}\n`;
+                  plainText += `  • ${ticketDisplay} - ${pr.title} - PR#${pr.number} By: @${pr.author}\n`;
                 }
                 
                 slackMessage += '\n';
@@ -307,9 +316,9 @@ jobs:
               }
             } else {
               // No PRs found
-              slackMessage = `*🚀 Release Notes - ${dateStr}*\n\nNo PRs with 'release' label found.`;
-              confluenceHtml = `<h1>Release Notes - ${dateStr}</h1><p>No PRs with 'release' label found.</p>`;
-              plainText = `Release Notes - ${dateStr}\n\nNo PRs with 'release' label found.`;
+              slackMessage = `*🚀 Release Notes - ${dateStr}*\n\nNo PRs with 'release' or 'release_if_approved' label found (merged in last 48 hours).`;
+              confluenceHtml = `<h1>Release Notes - ${dateStr}</h1><p>No PRs with 'release' or 'release_if_approved' label found (merged in last 48 hours).</p>`;
+              plainText = `Release Notes - ${dateStr}\n\nNo PRs with 'release' or 'release_if_approved' label found (merged in last 48 hours).`;
             }
             
             console.log('Has PRs:', hasPRs);
@@ -438,23 +447,36 @@ jobs:
               results.push(`\n📦 ${owner}/${repo}:`);
               
               for (const pr of prs) {
-                console.log(`  Attempting to remove 'release' label from PR#${pr.number}...`);
+                console.log(`  Attempting to remove labels from PR#${pr.number}...`);
                 console.log(`    URL: https://github.com/${owner}/${repo}/pull/${pr.number}`);
                 
-                try {
-                  const response = await github.rest.issues.removeLabel({
-                    owner,
-                    repo,
-                    issue_number: pr.number,
-                    name: 'release'
-                  });
-                  console.log(`  ✅ Success! Status: ${response.status}`);
-                  results.push(`  ✅ PR#${pr.number}: label removed`);
-                } catch (error) {
-                  console.log(`  ❌ Failed! Error: ${error.message}`);
-                  console.log(`    Status: ${error.status}`);
-                  console.log(`    Full error:`, JSON.stringify(error, null, 2));
-                  results.push(`  ❌ PR#${pr.number}: ${error.message}`);
+                const labelsToRemove = ['release', 'release_if_approved'];
+                let removedLabels = [];
+                
+                for (const labelName of labelsToRemove) {
+                  try {
+                    const response = await github.rest.issues.removeLabel({
+                      owner,
+                      repo,
+                      issue_number: pr.number,
+                      name: labelName
+                    });
+                    console.log(`  ✅ Removed '${labelName}' label. Status: ${response.status}`);
+                    removedLabels.push(labelName);
+                  } catch (error) {
+                    // Label might not exist, which is fine
+                    if (error.status === 404) {
+                      console.log(`  ℹ️ Label '${labelName}' not found (may have been removed already)`);
+                    } else {
+                      console.log(`  ⚠️ Failed to remove '${labelName}': ${error.message}`);
+                    }
+                  }
+                }
+                
+                if (removedLabels.length > 0) {
+                  results.push(`  ✅ PR#${pr.number}: removed labels [${removedLabels.join(', ')}]`);
+                } else {
+                  results.push(`  ℹ️ PR#${pr.number}: no labels to remove`);
                 }
               }
             }
@@ -473,7 +495,7 @@ jobs:
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "Possible reasons:" >> $GITHUB_STEP_SUMMARY
             echo "- Dry run is enabled" >> $GITHUB_STEP_SUMMARY
-            echo "- No PRs with 'release' label found" >> $GITHUB_STEP_SUMMARY
+            echo "- No PRs with 'release' or 'release_if_approved' label found (merged in last 48h)" >> $GITHUB_STEP_SUMMARY
             echo "- Step conditions not met" >> $GITHUB_STEP_SUMMARY
           else
             echo '```' >> $GITHUB_STEP_SUMMARY
