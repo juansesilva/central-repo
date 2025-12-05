@@ -259,50 +259,54 @@ jobs:
             console.log('PR Data received:', JSON.stringify(prData, null, 2));
             console.log('Number of repos with PRs:', Object.keys(prData).length);
             
-            // Format for Slack
-            let slackMessage = `*🚀 Release Notes - ${dateStr}*\n\n`;
-            
-            // Format for Confluence (HTML)
-            let confluenceHtml = `<h1>Release Notes - ${dateStr}</h1>`;
-            
-            // Plain text for summary
-            let plainText = `Release Notes - ${dateStr}\n${'='.repeat(40)}\n\n`;
-            
-            for (const [repo, prs] of Object.entries(prData)) {
-              slackMessage += `*${repo}*\n`;
-              confluenceHtml += `<h2>${repo}</h2><ul>`;
-              plainText += `${repo}\n${'-'.repeat(repo.length)}\n`;
-              
-              for (const pr of prs) {
-                const ticketLink = pr.ticketId ? `${jiraBase}/${pr.ticketId}` : '';
-                const ticketDisplay = pr.ticketId || 'No ticket';
-                
-                // Slack format
-                if (pr.ticketId) {
-                  slackMessage += `  • <${ticketLink}|${pr.ticketId}> - ${pr.title} - <${pr.url}|PR#${pr.number}> @${pr.author}\n`;
-                } else {
-                  slackMessage += `  • ${ticketDisplay} - ${pr.title} - <${pr.url}|PR#${pr.number}> @${pr.author}\n`;
-                }
-                
-                // Confluence HTML
-                if (pr.ticketId) {
-                  confluenceHtml += `<li><a href="${ticketLink}">${pr.ticketId}</a> - ${pr.title} - <a href="${pr.url}">PR#${pr.number}</a> @${pr.author}</li>`;
-                } else {
-                  confluenceHtml += `<li>${ticketDisplay} - ${pr.title} - <a href="${pr.url}">PR#${pr.number}</a> @${pr.author}</li>`;
-                }
-                
-                // Plain text
-                plainText += `  • ${ticketDisplay} - ${pr.title} - PR#${pr.number} @${pr.author}\n`;
-              }
-              
-              slackMessage += '\n';
-              confluenceHtml += '</ul>';
-              plainText += '\n';
-            }
-            
             // Check if we have any PRs
             const hasPRs = Object.keys(prData).length > 0;
-            if (!hasPRs) {
+            
+            // Initialize messages
+            let slackMessage = '';
+            let confluenceHtml = '';
+            let plainText = '';
+            
+            if (hasPRs) {
+              // Add header only once at the beginning if there are PRs
+              slackMessage = `*🚀 Release Notes - ${dateStr}*\n\n`;
+              confluenceHtml = `<h1>Release Notes - ${dateStr}</h1>`;
+              plainText = `Release Notes - ${dateStr}\n${'='.repeat(40)}\n\n`;
+              
+              // Loop through repos and add their PRs
+              for (const [repo, prs] of Object.entries(prData)) {
+                slackMessage += `*${repo}*\n`;
+                confluenceHtml += `<h2>${repo}</h2><ul>`;
+                plainText += `${repo}\n${'-'.repeat(repo.length)}\n`;
+                
+                for (const pr of prs) {
+                  const ticketLink = pr.ticketId ? `${jiraBase}/${pr.ticketId}` : '';
+                  const ticketDisplay = pr.ticketId || 'No ticket';
+                  
+                  // Slack format
+                  if (pr.ticketId) {
+                    slackMessage += `  • <${ticketLink}|${pr.ticketId}> - ${pr.title} - <${pr.url}|PR#${pr.number}> By: @${pr.author}\n`;
+                  } else {
+                    slackMessage += `  • ${ticketDisplay} - ${pr.title} - <${pr.url}|PR#${pr.number}> By: @${pr.author}\n`;
+                  }
+                  
+                  // Confluence HTML
+                  if (pr.ticketId) {
+                    confluenceHtml += `<li><a href="${ticketLink}">${pr.ticketId}</a> - ${pr.title} - <a href="${pr.url}">PR#${pr.number}</a> @${pr.author}</li>`;
+                  } else {
+                    confluenceHtml += `<li>${ticketDisplay} - ${pr.title} - <a href="${pr.url}">PR#${pr.number}</a> @${pr.author}</li>`;
+                  }
+                  
+                  // Plain text
+                  plainText += `  • ${ticketDisplay} - ${pr.title} - PR#${pr.number} @${pr.author}\n`;
+                }
+                
+                slackMessage += '\n';
+                confluenceHtml += '</ul>';
+                plainText += '\n';
+              }
+            } else {
+              // No PRs found
               slackMessage = `*🚀 Release Notes - ${dateStr}*\n\nNo PRs with 'release' label found.`;
               confluenceHtml = `<h1>Release Notes - ${dateStr}</h1><p>No PRs with 'release' label found.</p>`;
               plainText = `Release Notes - ${dateStr}\n\nNo PRs with 'release' label found.`;
