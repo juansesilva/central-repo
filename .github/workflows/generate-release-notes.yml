@@ -185,13 +185,70 @@ jobs:
                 console.log(`  📝 Total unique closed PRs found: ${prsData.length}`);
                 debugInfo.push(`- Total unique closed PRs: ${prsData.length}`);
                 
-                const releasePRs = [];
+                // For monorepo hack-repo1, we'll group PRs by the checked option in PR body
+                const releasePRsBySubrepo = {};
                 let mergedCount = 0;
                 let withLabelCount = 0;
                 
                 // Calculate 48 hours ago timestamp
                 const now = new Date();
                 const fortyEightHoursAgo = new Date(now.getTime() - (48 * 60 * 60 * 1000));
+                
+                // Helper function to extract checked repo name from PR body for hack-repo1
+                const extractRepoNameFromPRBody = (prBody) => {
+                  if (!prBody) return null;
+                  
+                  const allCheckboxes = [];
+                  const checkedOptions = [];
+                  
+                  // Find all checkbox lines (both checked and unchecked)
+                  const lines = prBody.split('\n');
+                  for (const line of lines) {
+                    const trimmedLine = line.trim();
+                    // Match checkbox pattern: - [x] NAME or - [ x ] NAME or - [ ] NAME
+                    // This matches both checked [x] and unchecked [ ] boxes
+                    const checkboxMatch = trimmedLine.match(/^-\s*\[\s*([x\s]*)\]\s*(.+)$/i);
+                    if (checkboxMatch) {
+                      const isChecked = checkboxMatch[1].toLowerCase().includes('x');
+                      const optionText = checkboxMatch[2].trim();
+                      
+                      // Extract the repo name (first word, typically uppercase like AX, PX, SDK, CRM)
+                      const repoNameMatch = optionText.match(/^([A-Z]+)/);
+                      if (repoNameMatch) {
+                        const repoName = repoNameMatch[1];
+                        const hasTag = optionText.length > repoNameMatch[1].length; // Has additional text after repo name
+                        
+                        allCheckboxes.push({
+                          repoName: repoName,
+                          fullText: optionText,
+                          hasTag: hasTag,
+                          isChecked: isChecked
+                        });
+                        
+                        if (isChecked) {
+                          checkedOptions.push({
+                            repoName: repoName,
+                            fullText: optionText,
+                            hasTag: hasTag
+                          });
+                        }
+                      }
+                    }
+                  }
+                  
+                  if (checkedOptions.length === 0) return null;
+                  
+                  // Check if ANY option (checked or unchecked) has a tag
+                  const hasAnyTag = allCheckboxes.some(cb => cb.hasTag);
+                  
+                  if (hasAnyTag) {
+                    // If any option has a tag, use default name
+                    return 'hack-repo1';
+                  }
+                  
+                  // Return the first checked repo name
+                  return checkedOptions[0].repoName;
+                };
                 
                 for (const pr of prsData) {
                   const isMerged = !!pr.merged_at;
@@ -227,28 +284,60 @@ jobs:
                       ticketId = titleMatch[1];
                     }
                     
-                    releasePRs.push({
+                    const prData = {
                       number: pr.number,
                       title: pr.title,
                       author: pr.user.login,
                       ticketId: ticketId,
                       mergedAt: pr.merged_at,
                       url: pr.html_url
-                    });
+                    };
                     
-                    console.log(`    ✅ INCLUDED: PR#${pr.number} - ${pr.title.substring(0, 40)}...`);
+                    // For hack-repo1, extract repo name from PR body
+                    let targetRepoKey = repo;
+                    if (repo === 'hack-repo1') {
+                      const extractedRepoName = extractRepoNameFromPRBody(pr.body);
+                      if (extractedRepoName) {
+                        targetRepoKey = extractedRepoName;
+                        console.log(`    📍 PR#${pr.number}: Extracted repo name "${extractedRepoName}" from PR body`);
+                      } else {
+                        // If no checkbox found, use default
+                        targetRepoKey = 'hack-repo1';
+                        console.log(`    ⚠️ PR#${pr.number}: No checkbox found in PR body, using default "hack-repo1"`);
+                      }
+                    }
+                    
+                    // Initialize array for this repo key if it doesn't exist
+                    if (!releasePRsBySubrepo[targetRepoKey]) {
+                      releasePRsBySubrepo[targetRepoKey] = [];
+                    }
+                    
+                    releasePRsBySubrepo[targetRepoKey].push(prData);
+                    
+                    console.log(`    ✅ INCLUDED: PR#${pr.number} - ${pr.title.substring(0, 40)}... (grouped under: ${targetRepoKey})`);
                   }
                 }
                 
-                console.log(`  📊 Summary: ${mergedCount} merged, ${withLabelCount} with 'release'/'release_if_approved' label, ${releasePRs.length} to include (merged in last 48h)`);
+                console.log(`  📊 Summary: ${mergedCount} merged, ${withLabelCount} with 'release'/'release_if_approved' label`);
                 debugInfo.push(`- Merged PRs: ${mergedCount}`);
                 debugInfo.push(`- PRs with 'release' or 'release_if_approved' label: ${withLabelCount}`);
-                debugInfo.push(`- PRs to include (merged + label + last 48h): ${releasePRs.length}`);
                 
-                if (releasePRs.length > 0) {
-                  allPRs[repo] = releasePRs;
-                  debugInfo.push(`- ✅ Added ${releasePRs.length} PRs to release notes`);
-                } else {
+                // Add all grouped PRs to allPRs
+                let totalPRs = 0;
+                for (const [repoKey, prs] of Object.entries(releasePRsBySubrepo)) {
+                  if (prs.length > 0) {
+                    // If repoKey already exists (from another iteration), merge arrays
+                    if (allPRs[repoKey]) {
+                      allPRs[repoKey] = allPRs[repoKey].concat(prs);
+                    } else {
+                      allPRs[repoKey] = prs;
+                    }
+                    totalPRs += prs.length;
+                    debugInfo.push(`- ✅ Added ${prs.length} PRs to release notes under "${repoKey}"`);
+                  }
+                }
+                
+                if (totalPRs === 0) {
                   debugInfo.push(`- ⚠️ No PRs matched criteria`);
                 }
                 
